@@ -1,13 +1,14 @@
 #include "ReflectionParser.h"
 #include "StringConvert.h"
 #include <cassert>
+#include <cstdint>
 #include <iostream>
 
 // libclang
 bool ReflectionParser::Initialize(const std::vector<const char*>& compilerArgs)
 {
     index_ = clang_createIndex(0, 0);
-    uint options = 0
+    uint32_t options = 0
         | CXTranslationUnit_DetailedPreprocessingRecord
         //        | CXTranslationUnit_PrecompiledPreamble
         | CXTranslationUnit_KeepGoing
@@ -22,6 +23,25 @@ bool ReflectionParser::Initialize(const std::vector<const char*>& compilerArgs)
         return false;
     }
     rootCursor_ = clang_getTranslationUnitCursor(translationUnit_);
+
+    // FIXME: libclang cannot find some system header correctly, thus disable the following code
+    // auto numDiagnostics = clang_getNumDiagnostics(translationUnit_);
+    // if (numDiagnostics > 0) {
+    //     std::cerr << "Failed to parse file " << file_ << ": ";
+    //     for (unsigned i = 0; i < numDiagnostics; ++i) {
+    //         auto diag = clang_getDiagnostic(translationUnit_, i);
+    //         std::cerr << clang_formatDiagnostic(
+    //             diag,
+    //             CXDiagnostic_DisplaySourceLocation
+    //                 | CXDiagnostic_DisplayColumn
+    //                 | CXDiagnostic_DisplaySourceRanges
+    //                 | CXDiagnostic_DisplayOption
+    //                 | CXDiagnostic_DisplayCategoryId
+    //                 | CXDiagnostic_DisplayCategoryName)
+    //                   << std::endl;
+    //     }
+    //     return false;
+    // }
     return true;
 }
 

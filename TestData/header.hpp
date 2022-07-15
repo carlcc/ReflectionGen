@@ -13,7 +13,7 @@
 
 #define P_DECLARE_FRIENDS(className) friend class ReflectionGenerated_Operator_##className;
 
-//#include <string>
+#include <string>
 
 namespace ReflectionTest {
 

@@ -2,6 +2,8 @@
 local Config = {
     CompilerOptions = {
         "-std=c++17",
+        "-x", "c++",
+        "-Wno-pragma-once-outside-header",
         "-DP_PROPERTY(...)=__attribute__((annotate(\"reflected,\" #__VA_ARGS__)))",
         "-DP_METHOD(...)=__attribute__((annotate(\"reflected,\" #__VA_ARGS__)))",
         "-DP_CLASS(...)=__attribute__((annotate(\"reflected,\" #__VA_ARGS__)))",
@@ -139,10 +141,12 @@ public:
 
 end
 
-local function GenerateCode(parseResult)
+local function GenerateCode(parseResult, parseTask)
+    print(parseTask.file)
     local classes = parseResult.classes
     local enums = parseResult.enums
     for fullName, clazz in pairs(classes) do
+        print("ClassID " .. MiscUtils.FetchAddClassId())
         if not clazz.annotations:empty() then
             PrintClass(clazz)
         end
@@ -159,7 +163,7 @@ local function GenerateCode(parseResult)
     end
 end
 
-ReflectionGen = {
-    Config = Config,
+ReflectionGenConfig = Config
+ReflectionGenCallback = {
     OnFileParsed = GenerateCode,
 }
