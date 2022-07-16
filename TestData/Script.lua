@@ -142,7 +142,7 @@ public:
 end
 
 local function GenerateCode(parseResult, parseTask)
-    print(parseTask.file)
+    print(parseTask.inputFile, parseTask.outputFile)
     local classes = parseResult.classes
     local enums = parseResult.enums
     for fullName, clazz in pairs(classes) do
