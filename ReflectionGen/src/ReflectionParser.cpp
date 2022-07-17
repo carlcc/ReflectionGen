@@ -66,6 +66,12 @@ bool ReflectionParser::Parse()
     }(cursor)
 CXChildVisitResult ReflectionParser::VisitNamespace(CXCursor c, CXCursor parent)
 {
+    // Only parse classes in main file
+    auto loc = clang_getCursorLocation(c);
+    if (!clang_Location_isFromMainFile(loc)) {
+        return CXChildVisit_Continue;
+    }
+
     auto kind = clang_getCursorKind(c);
     switch (kind) {
     case CXCursor_Namespace: {
@@ -94,6 +100,7 @@ CXChildVisitResult ReflectionParser::VisitClass(CXCursor c, CXCursor parent)
 {
     auto name = GetClangCursorSpelling(c);
     auto classMeta = parseState_.GetOrCreateClassMetaInCurrentNamespace(name);
+    classMeta->isAbstract = clang_CXXRecord_isAbstract(c);
 
     struct Context {
         ClassMeta* classMeta;

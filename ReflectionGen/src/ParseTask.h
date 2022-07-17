@@ -6,6 +6,7 @@
 #include <string>
 
 struct ParseTask {
+    const std::vector<const char*>* scriptParams;
     std::string inputFile;
     std::string outputFile;
 };

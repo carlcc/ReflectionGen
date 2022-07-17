@@ -44,6 +44,7 @@ struct EnumMeta : public BaseMeta {
 };
 
 struct ClassMeta : public BaseMeta {
+    bool isAbstract;
     std::vector<std::shared_ptr<ConstructorMeta>> constructors;
     std::vector<std::shared_ptr<MethodMeta>> methods;
     std::vector<std::shared_ptr<FieldMeta>> fields;

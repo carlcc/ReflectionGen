@@ -146,7 +146,7 @@ local function GenerateCode(parseResult, parseTask)
     local classes = parseResult.classes
     local enums = parseResult.enums
     for fullName, clazz in pairs(classes) do
-        print("ClassID " .. MiscUtils.FetchAddClassId())
+        print("ClassID " .. MiscUtils.NextClassId())
         if not clazz.annotations:empty() then
             PrintClass(clazz)
         end

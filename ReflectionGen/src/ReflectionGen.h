@@ -9,8 +9,11 @@ struct ReflectionGenConfig {
     std::vector<std::string> dirs {};
     std::vector<std::string> files {};
     std::string outputDir {};
+    std::string relativeDir {};
     uint32_t workThreadsCount {};
     std::vector<const char*> clangParams {};
+    std::vector<const char*> scriptParams {};
+    bool debug { false };
 };
 
 class ReflectionGen {
@@ -20,6 +23,9 @@ public:
     {
     }
     int Run();
+
+private:
+    bool CheckPaths();
 
 private:
     ReflectionGenConfig config_;

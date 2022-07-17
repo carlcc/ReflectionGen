@@ -2,7 +2,9 @@
 #include "Meta.h"
 #include "ParseTask.h"
 #include "ReflectionParser.h"
+#include "StringUtils.h"
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <regex>
@@ -11,6 +13,14 @@
 #include <unordered_set>
 
 static std::atomic_uint64_t gCurrentClassIndex { 0 };
+static std::mutex gScriptGlobalMutex {};
+
+static inline uint64_t GetSteadyTimeMicros()
+{
+    using namespace std::chrono;
+    return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
 static void BindScript(sol::state& lua)
 {
     lua.open_libraries(sol::lib::base, sol::lib::package, sol::lib::coroutine,
@@ -21,6 +31,7 @@ static void BindScript(sol::state& lua)
     auto refGen = lua["ReflectionGen"].get_or_create<sol::table>();
 
     refGen.new_usertype<ParseTask>("ParseTask",
+        "scriptParams", &ParseTask::scriptParams,
         "inputFile", &ParseTask::inputFile,
         "outputFile", &ParseTask::outputFile
         //
@@ -44,6 +55,7 @@ static void BindScript(sol::state& lua)
         //
     );
     refGen.new_usertype<ClassMeta>("ClassMeta",
+        "isAbstract", &ClassMeta::isAbstract,
         "name", &ClassMeta::name,
         "annotations", &ClassMeta::annotations,
         "namespace", &ClassMeta::namespace_,
@@ -105,8 +117,17 @@ static void BindScript(sol::state& lua)
         std::filesystem::create_directories(p);
     };
     auto miscUtils = lua["MiscUtils"].get_or_create<sol::table>();
-    miscUtils["FetchAddClassId"] = []() {                       // Used to generating class id
-        return std::to_string(gCurrentClassIndex.fetch_add(1)); //
+    miscUtils["NextClassId"] = []() { // Used to generating class id
+        // 1 year = 365 * 24*3600*1000*1000 = 31536000000000 = 0x00001CAE8C13E000 us
+        // Thus we take the high 12 bits as an atomic counter, and the rest 52 bits as timestamp,
+        // this will make a unique ID, even you run this program multiple times,
+        // unless you generate more than 4095 IDs in one us or run multiple instances of this program simultaneously.
+        auto id = (gCurrentClassIndex.fetch_add(1) << 52U) | GetSteadyTimeMicros();
+        return std::to_string(id); //
+    };
+    miscUtils["DoExclusively"] = [](const std::function<void()>& job) {
+        std::unique_lock<std::mutex> lck(gScriptGlobalMutex);
+        job();
     };
 }
 
@@ -176,36 +197,33 @@ static void AddCompilerArgs(std::vector<const char*>& dst, const std::vector<con
     }
 }
 
+std::atomic_int gWorkThreadIdCounter { 0 };
 class WorkThread {
 public:
-    explicit WorkThread(ParseTaskQueue& taskQueue, const std::vector<const char*>& compilerFlags)
-        : taskQueue_ { taskQueue }
-        , compilerArgs_ { compilerFlags }
+    explicit WorkThread(const ReflectionGenConfig& config, ParseTaskQueue& taskQueue)
+        : config_ { config }
+        , threadId_ { gWorkThreadIdCounter++ }
+        , taskQueue_ { taskQueue }
     {
     }
     ~WorkThread()
     {
-        isThreadRunning_ = false;
         if (thread_.joinable()) {
             thread_.join();
         }
     }
 
-    bool Initialize(const std::string& scriptFile)
+    bool Initialize()
     {
         BindScript(lua_);
 
-        if (0 != DoScript(lua_, scriptFile)) {
+        if (0 != DoScript(lua_, config_.scriptFile)) {
             return false;
         }
 
         if (!GetCompilerOptions(lua_, compilerArgsFromLua_)) {
             return false;
         }
-        std::vector<const char*> args;
-        AddCompilerArgs(args, compilerArgsFromLua_);
-        AddCompilerArgs(args, compilerArgs_);
-        compilerArgs_ = std::move(args);
 
         isThreadRunning_ = true;
         thread_ = std::thread([this]() {
@@ -218,6 +236,19 @@ public:
 private:
     void ThreadRoutine()
     {
+        std::vector<const char*> compilerArgs;
+        AddCompilerArgs(compilerArgs, compilerArgsFromLua_);
+        AddCompilerArgs(compilerArgs, config_.clangParams);
+
+        if (config_.debug) {
+            std::stringstream ss;
+            ss << "This is thread " << threadId_ << ", the clang params are: \n";
+            for (size_t index = 0; index < compilerArgs.size(); ++index) {
+                ss << "arg[" << index << "] = " << compilerArgs[index] << "\n";
+            }
+            std::cout << ss.str() << std::flush;
+        }
+
         while (isThreadRunning_) {
             int ret = 0;
             auto* task = taskQueue_.Pop();
@@ -226,9 +257,8 @@ private:
             }
             const std::string& codeFile = task->inputFile;
             ReflectionParser parser { codeFile };
-            std::cout << "Parsing file: " << codeFile << std::endl;
 
-            if (!parser.Initialize(compilerArgs_)) {
+            if (!parser.Initialize(compilerArgs)) {
                 ret = -1;
                 goto END;
             }
@@ -257,11 +287,12 @@ private:
     }
 
 private:
+    const ReflectionGenConfig& config_;
+    int threadId_ {};
     ParseTaskQueue& taskQueue_;
     std::thread thread_ {};
     std::atomic_bool isThreadRunning_ { false };
     sol::state lua_ {};
-    std::vector<const char*> compilerArgs_ {}; ///< All compiler args from lua and command line
     std::vector<std::string> compilerArgsFromLua_ {};
 };
 
@@ -330,6 +361,10 @@ static void PopulateParseTaskVectorDirs(std::vector<ParseTask>& parseTask, const
 
 int ReflectionGen::Run()
 {
+    if (!CheckPaths()) {
+        return 2;
+    }
+
     std::vector<ParseTask> parseTasks;
     {
         FilterContext filterContext {
@@ -346,25 +381,28 @@ int ReflectionGen::Run()
     std::vector<std::unique_ptr<WorkThread>> workThreads;
     workThreads.resize(workThreadsCount);
     for (auto& t : workThreads) {
-        t = std::make_unique<WorkThread>(taskQueue, config_.clangParams);
-        if (!t->Initialize(config_.scriptFile)) {
+        t = std::make_unique<WorkThread>(config_, taskQueue);
+        if (!t->Initialize()) {
             std::cerr << "Failed to initialize work thread" << std::endl;
             return 2;
         }
     }
 
+    int retCode = 0;
+    std::filesystem::path relativeDir(config_.relativeDir);
+    std::error_code ec;
     for (auto& item : parseTasks) {
         std::filesystem::path inputPath(item.inputFile);
-        std::filesystem::path outputPath {};
-#ifdef _WIN32
-        if (inputPath.is_absolute()) {
-            outputPath = std::filesystem::path(config_.outputDir + '/' + item.inputFile.substr(3)).string(); // remove the disk label
-        } else
-#endif
-        {
-            outputPath = std::filesystem::path(config_.outputDir + '/' + item.inputFile);
+        auto relativeInputPath = std::filesystem::relative(inputPath, relativeDir, ec);
+        if (ec.operator bool()) {
+            std::cerr << "Failed to calculate the path of '" << item.inputFile << "' relative to '" << config_.relativeDir << ": " << ec.message() << std::endl;
+            retCode = 1;
+            break;
         }
+        std::filesystem::path outputPath {};
+        outputPath = std::filesystem::path(config_.outputDir + '/' + relativeInputPath.string()).lexically_normal();
 
+        item.scriptParams = &config_.scriptParams;
         item.outputFile = outputPath.string();
         taskQueue.Push(&item);
     }
@@ -372,5 +410,30 @@ int ReflectionGen::Run()
         taskQueue.Push(nullptr); // to notify the work thread exit
     }
 
-    return 0;
+    return retCode;
+}
+
+static bool Contains(const std::filesystem::path& parent, const std::filesystem::path& child)
+{
+    auto parentNormal = std::filesystem::absolute(parent).lexically_normal();
+    auto childNormal = std::filesystem::absolute(child).lexically_normal();
+    return StringUtils::StartsWith(childNormal.string(), parentNormal.string());
+}
+
+bool ReflectionGen::CheckPaths()
+{
+    std::filesystem::path relativeDir(config_.relativeDir);
+    for (auto& f : config_.files) {
+        if (!Contains(relativeDir, f)) {
+            std::cerr << "Input file/dir (" << f << ") is not RELATIVE_DIR (" << config_.relativeDir << ") or inside it." << std::endl;
+            return false;
+        }
+    }
+    for (auto& d : config_.dirs) {
+        if (!Contains(relativeDir, d)) {
+            std::cerr << "Input file/dir (" << d << ") is not RELATIVE_DIR (" << config_.relativeDir << ") or inside it." << std::endl;
+            return false;
+        }
+    }
+    return true;
 }
